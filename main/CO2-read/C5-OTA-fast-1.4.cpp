@@ -1672,18 +1672,22 @@ static void scd40_run_forced_recalibration_ui(uint16_t reference_ppm = 430)
     epaper->setFont(ubuntu30);
     epaper->drawString("Calibration running", x_cursor, y_cursor);
     y_cursor += 50;
-    epaper->drawString("Keep in open air", x_cursor, y_cursor);
+    epaper->drawString("Keep in open air for 3 minutes", x_cursor, y_cursor);
     epaper->fullUpdate(true, false);
 
     while (iTime > 0) {
-        epaper->fillRect(x_cursor, 200, 600, 80, 0xF);
+        epaper->fillRect(x_cursor, 200, 250, 100, 0xF);
         epaper->setFont(ubuntu40);
         snprintf(text, sizeof(text), "%02d:%02d", iTime / 60, iTime % 60);
-        epaper->drawString(text, x_cursor, 250);
+        epaper->drawString(text, x_cursor, 260);
 
         // Use fullUpdate on a small box to avoid partial-update quirks
-        BB_RECT box{ .x = x_cursor, .y = 60, .w = 700, .h = 260 };
-        epaper->fullUpdate(false, false, &box);
+        BB_RECT box{ .x = x_cursor-2, .y = 200, .w = 250, .h = 100 };
+        if (iTime % 10 == 0) {
+            epaper->fullUpdate(false, false);
+        } else {
+            epaper->fullUpdate(false, false, &box);
+        }
 
         vTaskDelay(pdMS_TO_TICKS(5000));
         iTime -= 5;
@@ -1777,7 +1781,7 @@ static void calibration_task(void *arg)
                 // Arm calibration
                 s_calib_mode = true;
 
-                status_led_blue();
+                status_led_cyan();
                 epaper->fillScreen(0xF);
                 epaper->setFont(ubuntu30);
                 epaper->drawString("SCD40 Calibration", 40, 80);
@@ -1819,9 +1823,9 @@ static void calibration_task(void *arg)
             }
 
             s_calib_mode = false;
-            status_led_cyan();
-            scd40_run_forced_recalibration_ui(430);
             status_led_off();
+            scd40_run_forced_recalibration_ui(430);
+            
             }
     }
 }
@@ -2013,7 +2017,9 @@ void app_main()
         // Waiting for WiFi
         vTaskDelay(pdMS_TO_TICKS(100));
     }
-
+    if (s_calib_run_requested) {
+        return;
+    }
     build_request_json();
     send_data_to_api();
     deep_sleep();
