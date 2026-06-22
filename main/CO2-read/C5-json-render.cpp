@@ -888,26 +888,48 @@ void draw_claim_screen(const char* friendly_id, uint16_t sleep_minutes)
 
 
 /**
- * @brief Draws JSON response in display
- * 
- * @param tipo 
+ * @brief Renders the server response on the display.
+ *
+ * The top strip (≈40 px) always shows the next wakeup time and the battery
+ * indicator.  Below that, the "draw" array received from the API is rendered
+ * by FastJsonDL, so all layout decisions are made server-side.
  */
-void draw_response_analisis(int tipo) {
-    epaper->fillRect(0, 80, EPD_WIDTH, 300, 0xF);
-    epaper->setFont(ubuntu40);
-    int gridx1 = 150; int gridx2 = 800;
-    int gridy1 = 200; int gridy2 = 450;
-    char textbuffer[40];
-    
-    // NEXT Alarm
+void draw_response_analisis() {
+    // --- Top header strip ---
     epaper->setFont(ubuntu12);
-    epaper->setTextColor(0X0);
-    textbuffer[0] = '\0';
-    snprintf(textbuffer, sizeof(textbuffer), "NEXT WAKEUP Day:%d %02d:%02d VER. %.2f", alarm_day, alarm_hour, alarm_min, firmware_version);
-    epaper->drawString(textbuffer, gridx1, 58);
-    
-    // HERE is the entry point where JSON DL could be rendered 
-    //epaper->fullUpdate(false, false);
+    epaper->setTextColor(0x0);
+    char textbuffer[56];
+    snprintf(textbuffer, sizeof(textbuffer),
+             "NEXT WAKEUP Day:%d %02d:%02d  VER. %.2f",
+             alarm_day, alarm_hour, alarm_min, firmware_version);
+    epaper->drawString(textbuffer, 150, 30);
+
+    // Battery indicator is drawn by read_batt_level() (already called in scd_read)
+
+    // --- FastJsonDL: server-driven content below the header ---
+    if (res_draw_json[0] != '\0') {
+        // Wrap the items array in a full layout envelope for FastJsonDL.
+        // "clear": false keeps the header strip already drawn above intact.
+        const size_t envelope_extra = 64;
+        size_t layout_len = strlen(res_draw_json) + envelope_extra;
+        char *layout = (char *)malloc(layout_len);
+        if (layout) {
+            snprintf(layout, layout_len,
+                     "{\"display_bpp\":4,\"clear\":false,\"items\":%s}",
+                     res_draw_json);
+
+            if (!dl->renderJsonString(layout)) {
+                ESP_LOGE(TAG, "FastJsonDL render error: %s", dl->getLastError());
+            }
+            free(layout);
+        } else {
+            ESP_LOGE(TAG, "OOM: cannot allocate FastJsonDL layout buffer");
+        }
+    } else {
+        ESP_LOGW(TAG, "No draw commands received from server");
+    }
+
+    epaper->fullUpdate(true, false);
 }
 
 // IMPORTANT: Stays we will take care of this later
@@ -1025,8 +1047,8 @@ void send_data_to_api()
         draw_claim_screen(res_friendly_id, nvs_minutes_till_refresh);
         schedule_rtc_wakeup_minutes(nvs_minutes_till_refresh);
     } else {
-        // Normal onboarded response: render analytics.
-        draw_response_analisis(res_tipo);
+        // Normal onboarded response: render via FastJsonDL.
+        draw_response_analisis();
     }
 
     // Clean up
@@ -1327,28 +1349,6 @@ static void event_handler_rmk(void* arg, esp_event_base_t event_base, int32_t ev
     } else {
         ESP_LOGW(TAG, "Invalid event received!");
     }
-}
-
-void logo_sensoria(int x, int y)
-{
-    uint32_t bg_color = 0xF;
-    uint32_t fg_color = 0;
-    #if DARKMODE
-      bg_color = 0;
-      fg_color = 0xF;
-    #endif
-    epaper->fillCircle(x, y, 100, fg_color);
-    epaper->fillRect(x, y-100, 100, 200, bg_color); // Half Circle
-    epaper->drawCircle(x, y, 100, fg_color);
-    epaper->drawCircle(x, y, 80, fg_color);
-    epaper->drawCircle(x, y, 60, fg_color);
-    epaper->drawCircle(x, y, 40, fg_color);
-    epaper->drawCircle(x, y, 20, fg_color);
-    epaper->drawCircle(x, y, 99, fg_color); // Double lines
-    epaper->drawCircle(x, y, 79, fg_color);
-    epaper->drawCircle(x, y, 59, fg_color);
-    epaper->drawCircle(x, y, 39, fg_color);
-    epaper->drawCircle(x, y, 19, fg_color);
 }
 
 void epd_print_error(char *message)
@@ -1762,6 +1762,10 @@ void app_main()
     epaper->fillScreen(bgcolor);
     epaper->setTextColor(fgcolor);
     fb = epaper->currentBuffer();
+
+    // Initialise FastJsonDL after the EPD panel is ready
+    dl = new FastJsonDL(*epaper);
+    dl->setFontRegistry(g_fonts, sizeof(g_fonts) / sizeof(g_fonts[0]));
 
     esp_rmaker_console_init();
 
