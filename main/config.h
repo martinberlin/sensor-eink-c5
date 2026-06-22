@@ -29,4 +29,4 @@ const char * not_trustworthy = "NOT TRUSTWORTHY";
 // Station will refresh every:
 #define DEEP_SLEEP_MINUTES 30
 // INTERNALS
-#define MAX_HTTP_OUTPUT_BUFFER 1024
+#define MAX_HTTP_OUTPUT_BUFFER 8192

@@ -39,16 +39,14 @@ int batt_level = 0;
 #include "fast/ubuntu20.h"
 #include "fast/ubuntu30.h"
 #include "fast/ubuntu40.h"
-#include "fast/ubuntu_L_30.h"
-// Icons
-#include "fast/ico/ico_co2.h"
-#include "fast/ico/ico_temp.h"
-#include "fast/ico/ico_hum.h"
-#include "fast/ico/arrow_up.h"
-#include "fast/ico/arrow_down.h"
-#include "fast/ico/arrow_neutral.h"
-#include "fast/ico/alert.h"
-#include "fast/ico/confidence_chart.h"
+// FastJsonDL: server-driven rendering
+#include "FastJsonDL.h"
+static FastJsonDL *dl = nullptr;
+static const FastJsonDLFont g_fonts[] = {
+    { "Ubuntu20", ubuntu20 },
+    { "Ubuntu30", ubuntu30 },
+    { "Ubuntu40", ubuntu40 },
+};
 static const char *TAG = "CO2_ST";
 // Rainmaker
 //#include <esp_rmaker_console.h>
@@ -159,26 +157,10 @@ typedef struct
 } json_gen_test_result_t;
 json_gen_test_result_t result;
 static char *output_buffer; // Buffer to store response of http request from event handler
-// Recollected JSON Values
-int res_tipo = 0; // 0=ceo, 1=teams
-int res_confianza = 0;
-// Issue 12:
-const uint8_t color_no_confiable = 0x6;
-int res_confiable_bp_semanal = 1; // Por defecto los valores son TRUE en confiable_*
-int res_confiable_bp_mensual = 1;
-int res_confiable_calidad = 1;
-int res_confiable_prediccion = 1;
 
-int res_bienestar_30 = 0;
-int res_bienestar_7 = 0;
-int res_tendencia_7d = 0;
-int res_tendencia_30d = 0;
-int res_beneficio_30 = 0;
-int res_beneficio_7 = 0;
-int res_alert_hrs = 0;
-char res_alert_tipo[10];
-int res_alert_v = 0;
-char res_message[40];
+// Draw commands received from the server (a JSON array string)
+#define MAX_DRAW_JSON_LEN 7168
+static char res_draw_json[MAX_DRAW_JSON_LEN] = {0};
 
 // Flag to know that how many times the device booted
 int16_t nvs_boots = 0;
@@ -755,80 +737,59 @@ static void rv3032_force_int_enable()
 }
 
 /**
- * @copilot this is the function where JSON could be downloaded and parsed
- * Please be aware that in next iteration it will arrive ZLIB compressed
+ * @brief Parses the JSON response from the Sensoria API.
+ *
+ * Extracts: friendly_id (unclaimed device), sleep_minutes, alarm, datetime,
+ * and the "draw" field — a JSON array string that FastJsonDL will render.
  */
 void parse_json(const char* json_string)
 {
-    // Always clear these flags first so callers get a clean state even
-    // when cJSON_Parse() fails (e.g. plain-text "Unauthorised" body).
+    // Reset state before each parse so callers always get a clean slate.
     res_friendly_id[0] = '\0';
-    res_message[0] = '\0';
+    res_draw_json[0] = '\0';
 
-    // Parse the JSON string
     cJSON *root = cJSON_Parse(json_string);
     if (root == NULL) {
-        printf("Error before: [%s]\n", cJSON_GetErrorPtr());
+        printf("JSON parse error before: [%s]\n", cJSON_GetErrorPtr());
         return;
     }
 
-    // If the backend returns a friendly_id the device is not yet onboarded.
-    // Also read sleep_minutes so the backend can control the retry interval.
-    // Return early – the caller will handle the claim screen.
+    // Unclaimed device: backend returns a friendly_id instead of draw commands.
     cJSON *fid = cJSON_GetObjectItem(root, "friendly_id");
     if (cJSON_IsString(fid) && fid->valuestring != NULL) {
         snprintf(res_friendly_id, sizeof(res_friendly_id), "%s", fid->valuestring);
         cJSON *sm = cJSON_GetObjectItem(root, "sleep_minutes");
-        if (cJSON_IsNumber(sm) && sm->valueint > 0) {
-            nvs_minutes_till_refresh = sm->valueint;
-        } else {
-            nvs_minutes_till_refresh = CLAIM_RETRY_MINUTES; // sensible default if field is missing
-        }
+        nvs_minutes_till_refresh = (cJSON_IsNumber(sm) && sm->valueint > 0)
+                                   ? sm->valueint
+                                   : CLAIM_RETRY_MINUTES;
         ESP_LOGI(TAG, "Device not onboarded. Friendly ID: %s, sleep: %d min",
                  res_friendly_id, nvs_minutes_till_refresh);
         cJSON_Delete(root);
         return;
     }
 
-    // <deprecated> All this custom handling dissapears except next ALARM
-    // sleep_minutes: Get the integer value
+    // sleep_minutes
     cJSON *sleep_minutes = cJSON_GetObjectItem(root, "sleep_minutes");
-    /* cJSON *sensor_tipo = cJSON_GetObjectItem(root, "tipo");
-    cJSON *confianza = cJSON_GetObjectItem(root, "confianza");
-    cJSON *confiable_bp_semanal = cJSON_GetObjectItem(root, "confiable_bp_semanal");
-    cJSON *confiable_bp_mensual = cJSON_GetObjectItem(root, "confiable_bp_mensual");
-    cJSON *confiable_prediccion = cJSON_GetObjectItem(root, "confiable_prediccion");
-    cJSON *confiable_calidad = cJSON_GetObjectItem(root, "confiable_calidad");
+    if (cJSON_IsNumber(sleep_minutes)) {
+        nvs_minutes_till_refresh = sleep_minutes->valueint;
+    }
 
-    cJSON *bienestar_30 = cJSON_GetObjectItem(root, "bienestar_30");
-    cJSON *bienestar_7 = cJSON_GetObjectItem(root, "bienestar_7");
-    cJSON *tendencia_7 = cJSON_GetObjectItem(root, "tendencia_7d");
-    cJSON *tendencia_30 = cJSON_GetObjectItem(root, "tendencia_30d");
-    cJSON *beneficio_7 = cJSON_GetObjectItem(root, "beneficio_7");
-    cJSON *beneficio_30 = cJSON_GetObjectItem(root, "beneficio_30");
-    cJSON *alert_hrs = cJSON_GetObjectItem(root, "alert_hrs");
-    cJSON *alert_tipo = cJSON_GetObjectItem(root, "alert_tipo");
-    cJSON *alert_v = cJSON_GetObjectItem(root, "alert_v");
-    cJSON *message = cJSON_GetObjectItem(root, "message"); */
-
-    // Parse alarm
-    struct tm cTime;
-    struct tm aTime;
-    cTime.tm_sec = 0;
-    aTime.tm_sec = 0;
+    // alarm — next wakeup time shown in the header strip
+    struct tm aTime = {};
+    struct tm cTime = {};
     cJSON *alarm = cJSON_GetObjectItem(root, "alarm");
     if (alarm) {
         aTime.tm_mday = cJSON_GetObjectItem(alarm, "day")->valueint;
         aTime.tm_mon  = cJSON_GetObjectItem(alarm, "mo")->valueint;
         aTime.tm_year = cJSON_GetObjectItem(alarm, "year")->valueint;
         aTime.tm_hour = cJSON_GetObjectItem(alarm, "hr")->valueint;
-        aTime.tm_min = cJSON_GetObjectItem(alarm, "min")->valueint;
-        alarm_day = aTime.tm_mday;
+        aTime.tm_min  = cJSON_GetObjectItem(alarm, "min")->valueint;
+        alarm_day  = aTime.tm_mday;
         alarm_hour = aTime.tm_hour;
-        alarm_min = aTime.tm_min;
+        alarm_min  = aTime.tm_min;
     }
 
-    // Parse datetime. This should also stay in case we need to set-up RTC hour:
+    // datetime — used to sync the RTC once per day
     cJSON *datetime = cJSON_GetObjectItem(root, "datetime");
     if (datetime) {
         cTime.tm_wday = cJSON_GetObjectItem(datetime, "wday")->valueint;
@@ -836,67 +797,15 @@ void parse_json(const char* json_string)
         cTime.tm_mon  = cJSON_GetObjectItem(datetime, "mo")->valueint;
         cTime.tm_year = cJSON_GetObjectItem(datetime, "year")->valueint;
         cTime.tm_hour = cJSON_GetObjectItem(datetime, "hr")->valueint;
-        cTime.tm_min = cJSON_GetObjectItem(datetime, "min")->valueint;
-    }
-    // Let's keep it
-    if (cJSON_IsNumber(sleep_minutes)) {
-        //printf("Decoded sleep_minutes: %d\n", sleep_minutes->valueint);
-        nvs_minutes_till_refresh = sleep_minutes->valueint;
-    }
-    // Not important anymore, it will just render the incoming JSON DL
-    /*if (cJSON_IsString(sensor_tipo)) {
-        if (strcmp(sensor_tipo->valuestring, "teams") == 0) {
-            res_tipo = 1;
-        }   
-    }
-    if (cJSON_IsNumber(confianza)) {
-        res_confianza = confianza->valueint;
-    }
-    // Agrega confiable_*
-    if (cJSON_IsNumber(confiable_bp_semanal)) {
-        res_confiable_bp_semanal = confiable_bp_semanal->valueint;
-    }
-    if (cJSON_IsNumber(confiable_bp_mensual)) {
-        res_confiable_bp_mensual = confiable_bp_mensual->valueint;
-    }
-    if (cJSON_IsNumber(confiable_prediccion)) {
-        res_confiable_prediccion = confiable_prediccion->valueint;
-    }
-    if (cJSON_IsNumber(confiable_calidad)) {
-        res_confiable_calidad = confiable_calidad->valueint;
+        cTime.tm_min  = cJSON_GetObjectItem(datetime, "min")->valueint;
     }
 
-    if (cJSON_IsNumber(bienestar_7)) {
-        res_bienestar_7 = bienestar_7->valueint;
+    // draw — JSON array string with FastJsonDL rendering commands
+    cJSON *draw = cJSON_GetObjectItem(root, "draw");
+    if (cJSON_IsString(draw) && draw->valuestring != NULL) {
+        snprintf(res_draw_json, sizeof(res_draw_json), "%s", draw->valuestring);
     }
-    if (cJSON_IsNumber(bienestar_30)) {
-        res_bienestar_30 = bienestar_30->valueint;
-    }
-    if (cJSON_IsNumber(tendencia_7)) {
-        res_tendencia_7d = tendencia_7->valueint;
-    }
-    if (cJSON_IsNumber(tendencia_30)) {
-        res_tendencia_30d = tendencia_30->valueint;
-    }
-    if (cJSON_IsNumber(beneficio_7)) {
-        res_beneficio_7 = beneficio_7->valueint;
-    }
-    if (cJSON_IsNumber(beneficio_30)) {
-        res_beneficio_30 = beneficio_30->valueint;
-    }
-    if (cJSON_IsNumber(alert_hrs)) {
-        res_alert_hrs = alert_hrs->valueint;
-    }
-    if (cJSON_IsNumber(alert_v)) {
-        res_alert_v = alert_v->valueint;
-    }
-    if (cJSON_IsString(alert_tipo)) {
-        snprintf(res_alert_tipo, sizeof(res_alert_tipo), "%s", alert_tipo->valuestring);
-    }
-    if (cJSON_IsString(message)) {
-       snprintf(res_message, sizeof(res_message), "%s", message->valuestring);
-    } */
-    // Clean up
+
     cJSON_Delete(root);
 
     // Set RTC values
