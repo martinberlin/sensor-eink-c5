@@ -467,6 +467,79 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
     return ESP_OK;
 }
 
+struct HttpBuffer {
+    uint8_t *data;
+    int len;
+    int max_len;
+};
+
+esp_err_t _playlist_http_event_handler(esp_http_client_event_t *evt)
+{
+    switch (evt->event_id)
+    {
+    case HTTP_EVENT_ERROR:
+        ESP_LOGD(TAG, "Playlist HTTP_EVENT_ERROR");
+        break;
+
+    case HTTP_EVENT_ON_CONNECTED:
+        ESP_LOGI(TAG, "Playlist HTTP_EVENT_ON_CONNECTED");
+        if (evt->user_data) {
+            HttpBuffer *buf = (HttpBuffer *)evt->user_data;
+            buf->len = 0;
+        }
+        break;
+
+    case HTTP_EVENT_HEADER_SENT:
+        ESP_LOGI(TAG, "Playlist HTTP_EVENT_HEADER_SENT");
+        break;
+
+    case HTTP_EVENT_ON_HEADER:
+        ESP_LOGD(TAG, "Playlist HTTP_EVENT_ON_HEADER, key=%s, value=%s", evt->header_key, evt->header_value);
+        break;
+
+    case HTTP_EVENT_ON_DATA:
+    {
+        ESP_LOGI(TAG, "Playlist HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
+        if (evt->user_data) {
+            HttpBuffer *buf = (HttpBuffer *)evt->user_data;
+            int copy_len = MIN(evt->data_len, (buf->max_len - buf->len));
+            if (copy_len > 0) {
+                ESP_LOGI(TAG, "Copying %d bytes to user_data at offset %d", copy_len, buf->len);
+                memcpy(buf->data + buf->len, evt->data, copy_len);
+                buf->len += copy_len;
+            }
+            ESP_LOGI(TAG, "Total playlist output_len now: %d", buf->len);
+        }
+        break;
+    }
+
+    case HTTP_EVENT_ON_FINISH:
+        ESP_LOGD(TAG, "Playlist HTTP_EVENT_ON_FINISH");
+        break;
+
+    case HTTP_EVENT_DISCONNECTED:
+    {
+        ESP_LOGI(TAG, "Playlist HTTP_EVENT_DISCONNECTED");
+        int mbedtls_err = 0;
+        esp_err_t err = esp_tls_get_and_clear_last_error((esp_tls_error_handle_t)evt->data, &mbedtls_err, NULL);
+        if (err != 0)
+        {
+            ESP_LOGI(TAG, "Playlist last esp error code: 0x%x", err);
+            ESP_LOGI(TAG, "Playlist last mbedtls failure: 0x%x", mbedtls_err);
+        }
+        break;
+    }
+
+    case HTTP_EVENT_REDIRECT:
+    {
+        ESP_LOGD(TAG, "Playlist HTTP_EVENT_REDIRECT");
+        esp_http_client_set_redirection(evt->client);
+        break;
+    }
+    }
+    return ESP_OK;
+}
+
 /* Callback to handle commands received from the RainMaker cloud */
 static esp_err_t write_cb(const esp_rmaker_device_t *device, const esp_rmaker_param_t *param,
                           const esp_rmaker_param_val_t val, void *priv_data, esp_rmaker_write_ctx_t *ctx)
@@ -746,41 +819,44 @@ static void rv3032_force_int_enable()
  * Extracts: friendly_id (unclaimed device), sleep_minutes, alarm, datetime,
  * and the "draw" field — a JSON array string that FastJsonDL will render.
  */
-void parse_json(const char* json_string)
+struct LogResponse {
+    int onboarded; // -1 if not parsed, 0 if not onboarded, 1 if onboarded
+    char friendly_id[FRIENDLY_ID_MAX_LEN];
+    int sleep_minutes;
+    struct tm alarm;
+    struct tm datetime;
+    bool has_alarm;
+    bool has_datetime;
+};
+
+bool parse_log_response(const char* json_string, LogResponse& out)
 {
-    // Reset state before each parse so callers always get a clean slate.
-    res_friendly_id[0] = '\0';
-    res_draw_json[0] = '\0';
+    memset(&out, 0, sizeof(LogResponse));
+    out.onboarded = -1;
 
     cJSON *root = cJSON_Parse(json_string);
     if (root == NULL) {
         printf("JSON parse error before: [%s]\n", cJSON_GetErrorPtr());
-        return;
+        return false;
     }
 
-    // Unclaimed device: backend returns a friendly_id instead of draw commands.
+    cJSON *onb = cJSON_GetObjectItem(root, "onboarded");
+    if (cJSON_IsNumber(onb)) {
+        out.onboarded = onb->valueint;
+    }
+
     cJSON *fid = cJSON_GetObjectItem(root, "friendly_id");
     if (cJSON_IsString(fid) && fid->valuestring != NULL) {
-        snprintf(res_friendly_id, sizeof(res_friendly_id), "%s", fid->valuestring);
-        cJSON *sm = cJSON_GetObjectItem(root, "sleep_minutes");
-        nvs_minutes_till_refresh = (cJSON_IsNumber(sm) && sm->valueint > 0)
-                                   ? sm->valueint
-                                   : CLAIM_RETRY_MINUTES;
-        ESP_LOGI(TAG, "Device not onboarded. Friendly ID: %s, sleep: %d min",
-                 res_friendly_id, nvs_minutes_till_refresh);
-        cJSON_Delete(root);
-        return;
+        snprintf(out.friendly_id, sizeof(out.friendly_id), "%s", fid->valuestring);
     }
 
-    // sleep_minutes
-    cJSON *sleep_minutes = cJSON_GetObjectItem(root, "sleep_minutes");
-    if (cJSON_IsNumber(sleep_minutes)) {
-        nvs_minutes_till_refresh = sleep_minutes->valueint;
+    cJSON *sm = cJSON_GetObjectItem(root, "sleep_minutes");
+    if (cJSON_IsNumber(sm)) {
+        out.sleep_minutes = sm->valueint;
+    } else {
+        out.sleep_minutes = CLAIM_RETRY_MINUTES;
     }
 
-    // alarm — next wakeup time shown in the header strip
-    struct tm aTime = {};
-    struct tm cTime = {};
     cJSON *alarm = cJSON_GetObjectItem(root, "alarm");
     if (alarm) {
         cJSON *day  = cJSON_GetObjectItem(alarm, "day");
@@ -790,18 +866,15 @@ void parse_json(const char* json_string)
         cJSON *min  = cJSON_GetObjectItem(alarm, "min");
         if (cJSON_IsNumber(day) && cJSON_IsNumber(mo) && cJSON_IsNumber(year) &&
             cJSON_IsNumber(hr)  && cJSON_IsNumber(min)) {
-            aTime.tm_mday = day->valueint;
-            aTime.tm_mon  = mo->valueint;
-            aTime.tm_year = year->valueint;
-            aTime.tm_hour = hr->valueint;
-            aTime.tm_min  = min->valueint;
-            alarm_day  = aTime.tm_mday;
-            alarm_hour = aTime.tm_hour;
-            alarm_min  = aTime.tm_min;
+            out.alarm.tm_mday = day->valueint;
+            out.alarm.tm_mon  = mo->valueint;
+            out.alarm.tm_year = year->valueint;
+            out.alarm.tm_hour = hr->valueint;
+            out.alarm.tm_min  = min->valueint;
+            out.has_alarm = true;
         }
     }
 
-    // datetime — used to sync the RTC once per day
     cJSON *datetime = cJSON_GetObjectItem(root, "datetime");
     if (datetime) {
         cJSON *wday = cJSON_GetObjectItem(datetime, "wday");
@@ -812,29 +885,42 @@ void parse_json(const char* json_string)
         cJSON *min  = cJSON_GetObjectItem(datetime, "min");
         if (cJSON_IsNumber(wday) && cJSON_IsNumber(day) && cJSON_IsNumber(mo) &&
             cJSON_IsNumber(year) && cJSON_IsNumber(hr)  && cJSON_IsNumber(min)) {
-            cTime.tm_wday = wday->valueint;
-            cTime.tm_mday = day->valueint;
-            cTime.tm_mon  = mo->valueint;
-            cTime.tm_year = year->valueint;
-            cTime.tm_hour = hr->valueint;
-            cTime.tm_min  = min->valueint;
+            out.datetime.tm_wday = wday->valueint;
+            out.datetime.tm_mday = day->valueint;
+            out.datetime.tm_mon  = mo->valueint;
+            out.datetime.tm_year = year->valueint;
+            out.datetime.tm_hour = hr->valueint;
+            out.datetime.tm_min  = min->valueint;
+            out.has_datetime = true;
         }
     }
 
-    // draw — JSON array string with FastJsonDL rendering commands
-    cJSON *draw = cJSON_GetObjectItem(root, "draw");
-    if (cJSON_IsString(draw) && draw->valuestring != NULL) {
-        snprintf(res_draw_json, sizeof(res_draw_json), "%s", draw->valuestring);
+    if (out.onboarded == -1) {
+        if (out.friendly_id[0] != '\0') {
+            out.onboarded = 0;
+        } else {
+            out.onboarded = 1;
+        }
     }
 
     cJSON_Delete(root);
+    return true;
+}
 
-    // Set RTC values
-    // TODO: Update time to be set only once per day
-    //aTime.tm_hour = 15; //DEBUG
-    //aTime.tm_min = 50; //DEBUG
+void sync_rtc_and_alarm(const LogResponse &out) {
+    if (!out.has_alarm || !out.has_datetime) {
+        ESP_LOGW(TAG, "sync_rtc_and_alarm: missing alarm or datetime fields, skipping sync");
+        return;
+    }
+
+    struct tm aTime = out.alarm;
+    struct tm cTime = out.datetime;
     
-    // For now set this only on DAY 5 of the week
+    nvs_minutes_till_refresh = out.sleep_minutes;
+    alarm_day  = aTime.tm_mday;
+    alarm_hour = aTime.tm_hour;
+    alarm_min  = aTime.tm_min;
+
     if (rtc_day != aTime.tm_mday) {
         printf("RTC setTime: %02d/%02d/%d %02d:%02d WDAY:%d\n", cTime.tm_mday, cTime.tm_mon, cTime.tm_year, cTime.tm_hour, cTime.tm_min, cTime.tm_wday);
         rtc.setTime(&cTime); // Set the current time to the RTC
@@ -849,7 +935,6 @@ void parse_json(const char* json_string)
         raw_time = mktime(&normalized_alarm); // Normalize date transitions
         localtime_r(&raw_time, &normalized_alarm); // Apply normalized date
 
-        //rtc.setAlarm(ALARM_DAY, &normalized_alarm); // Set day alarm directly
         rtc.setAlarm(ALARM_TIME, &normalized_alarm); // No more ALARM_DAY let's use always only time alarm in RV3032
         printf("ALARM_DAY: %02d/%02d/%04d %02d:%02d\n", 
         normalized_alarm.tm_mday, normalized_alarm.tm_mon, 
@@ -860,9 +945,6 @@ void parse_json(const char* json_string)
         rtc.setTime(&cTime);
         rtc.setAlarm(ALARM_TIME, &aTime);
     } else {
-        // Debug to wake-up every 2 mins:
-        //aTime.tm_hour = cTime.tm_hour;
-        //aTime.tm_min = cTime.tm_min +4;
         rtc.setAlarm(ALARM_TIME, &aTime); // Same-day alarm
     }
     printf("ALARM_TIME: %02d/%02d/%d %02d:%02d\n", aTime.tm_mday, aTime.tm_mon, aTime.tm_year, aTime.tm_hour, aTime.tm_min);
@@ -940,14 +1022,18 @@ void draw_response_analisis() {
                  "{\"display_bpp\":4,\"clear\":false,\"items\":%s}",
                  res_draw_json);
 
+                 printf("LAY: %s\n", layout);
+
         if (!dl->renderJsonString(layout)) {
             ESP_LOGE(TAG, "FastJsonDL render error: %s", dl->getLastError());
+        } else {
+            ESP_LOGI(TAG, "FastJsonDL render done");
         }
     } else {
         ESP_LOGW(TAG, "No draw commands received from server");
     }
 
-    epaper->fullUpdate(true, false);
+    epaper->fullUpdate();
 }
 
 // IMPORTANT: Stays we will take care of this later
@@ -993,10 +1079,87 @@ static void schedule_rtc_wakeup_minutes(int minutes)
 }
 
 // Sends the ambient logging to API
+void read_batt_level();
+void fetch_and_render_playlist()
+{
+    char *compressed_buffer = (char*)malloc(MAX_HTTP_OUTPUT_BUFFER + 1);
+    if (compressed_buffer == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate memory for compressed response buffer");
+        schedule_rtc_wakeup_minutes(nvs_minutes_till_refresh);
+        return;
+    }
+    memset(compressed_buffer, 0, MAX_HTTP_OUTPUT_BUFFER + 1);
+    
+    HttpBuffer response_buf = {
+        .data = (uint8_t *)compressed_buffer,
+        .len = 0,
+        .max_len = MAX_HTTP_OUTPUT_BUFFER
+    };
+
+    esp_http_client_config_t config = {
+        .url = API_DL_PLAYLIST,
+        .method = HTTP_METHOD_GET,
+        .timeout_ms = 5000,
+        .event_handler = _playlist_http_event_handler,
+        .user_data = &response_buf,
+    };
+
+    ESP_LOGI(TAG, "Fetching next screen playlist from: %s", API_DL_PLAYLIST);
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client == NULL) {
+        ESP_LOGE(TAG, "Failed to initialize HTTP client for playlist");
+        schedule_rtc_wakeup_minutes(nvs_minutes_till_refresh);
+        free(compressed_buffer);
+        return;
+    }
+
+    char auth_header[AUTH_HEADER_MAX_LEN];
+    snprintf(auth_header, sizeof(auth_header), "Bearer %s", mac_string);
+    esp_http_client_set_header(client, "Authorization", auth_header);
+    esp_http_client_set_header(client, "Accept", "application/octet-stream");
+
+    esp_err_t err = esp_http_client_perform(client);
+    int status_code = 0;
+    if (err == ESP_OK) {
+        status_code = esp_http_client_get_status_code(client);
+        ESP_LOGI(TAG, "HTTP GET Playlist Status = %d, len = %d", status_code, response_buf.len);
+    } else {
+        ESP_LOGE(TAG, "HTTP GET Playlist request failed: %s", esp_err_to_name(err));
+    }
+
+    if (err == ESP_OK && status_code == 200 && response_buf.len > 0) {
+        if (dl == nullptr) {
+            ESP_LOGE(TAG, "FastJsonDL not initialized");
+        } else if (!dl->renderDeflatedJson((const uint8_t*)response_buf.data, response_buf.len)) {
+            ESP_LOGE(TAG, "FastJsonDL renderDeflatedJson error: %s", dl->getLastError());
+        } else {
+            ESP_LOGI(TAG, "FastJsonDL renderDeflatedJson success");
+        }
+
+        // Draw top bar header after JSON rendering to prevent override
+        epaper->setFont(ubuntu12);
+        epaper->setTextColor(0x0);
+        char textbuffer[56];
+        snprintf(textbuffer, sizeof(textbuffer),
+                 "NEXT WAKEUP Day:%d %02d:%02d  VER. %.2f",
+                 alarm_day, alarm_hour, alarm_min, firmware_version);
+        epaper->drawString(textbuffer, 150, 30);
+
+        // Re-draw battery level indicator
+        read_batt_level();
+
+        epaper->fullUpdate();
+    } else {
+        ESP_LOGE(TAG, "Failed to fetch playlist or status was not 200. Scheduling additional wake-up");
+        schedule_rtc_wakeup_minutes(nvs_minutes_till_refresh);
+    }
+
+    esp_http_client_cleanup(client);
+    free(compressed_buffer);
+}
+
 void send_data_to_api()
 {
-    // Allocate response buffer on heap to avoid stack overflow
-    // The buffer should only be used up to size MAX_HTTP_OUTPUT_BUFFER
     char *local_response_buffer = (char*)malloc(MAX_HTTP_OUTPUT_BUFFER + 1);
     if (local_response_buffer == NULL) {
         ESP_LOGE(TAG, "Failed to allocate memory for response buffer");
@@ -1004,26 +1167,17 @@ void send_data_to_api()
     }
     memset(local_response_buffer, 0, MAX_HTTP_OUTPUT_BUFFER + 1);
     
-    /**
-     * NOTE: All the configuration parameters for http_client must be spefied either in URL or as host and path parameters.
-     * If host and path parameters are not set, query parameter will be ignored. In such cases,
-     * query parameter should be specified in URL.
-     *
-     * If URL as well as host and path parameters are specified, values of host and path will be considered.
-     */
     esp_http_client_config_t config = {
-        .url = API_URL,
+        .url = API_DL_LOG,
         .method = HTTP_METHOD_POST,
         .timeout_ms = 3000,
         .event_handler = _http_event_handler,
-        .user_data = local_response_buffer, // Pass address of local buffer to get response
+        .user_data = local_response_buffer,
     };
 
-    printf("DATA: %s \nURL: %s\n", result.buf, API_URL);
+    printf("DATA: %s \nURL: %s\n", result.buf, API_DL_LOG);
     esp_http_client_handle_t client = esp_http_client_init(&config);
     esp_http_client_set_header(client, "Content-Type", "application/json");
-    // Authorisation: Bearer MAC_ADDRESS – used by backend to identify the device.
-    // If the MAC is not yet registered the backend returns a JSON with a friendly_id.
     char auth_header[AUTH_HEADER_MAX_LEN];
     snprintf(auth_header, sizeof(auth_header), "Bearer %s", mac_string);
     esp_http_client_set_header(client, "Authorization", auth_header);
@@ -1041,37 +1195,45 @@ void send_data_to_api()
     {
         ESP_LOGE(TAG, "HTTP POST request failed: %s. Scheduling additional wake-up", esp_err_to_name(err));
         schedule_rtc_wakeup_minutes(10);
+        esp_http_client_cleanup(client);
+        free(local_response_buffer);
+        return;
     }
 
-    // parse_json() will set res_friendly_id if the body contains a friendly_id field,
-    // or parse analytics fields if the device is already onboarded.
-    parse_json(local_response_buffer);
+    LogResponse log_res;
+    bool parse_ok = parse_log_response(local_response_buffer, log_res);
+    esp_http_client_cleanup(client);
 
-    // Detect unregistered device. The backend now always sends a proper JSON
-    // with a friendly_id field. HTTP 401 is kept as a belt-and-braces guard.
-    bool claim_pending = (status_code == 401) || (res_friendly_id[0] != '\0');
+    if (!parse_ok) {
+        ESP_LOGE(TAG, "Failed to parse API response. Scheduling additional wake-up");
+        schedule_rtc_wakeup_minutes(10);
+        free(local_response_buffer);
+        return;
+    }
+
+    bool claim_pending = (status_code == 401) || (log_res.onboarded == 0);
 
     if (claim_pending) {
-        // If somehow no friendly_id came from the body, use the MAC so the
-        // user still has a reference to enter at sensoria.cat.
-        if (res_friendly_id[0] == '\0') {
+        if (log_res.friendly_id[0] == '\0') {
             snprintf(res_friendly_id, sizeof(res_friendly_id), "%s", mac_string);
-            // nvs_minutes_till_refresh was already set by parse_json() from the
-            // backend's sleep_minutes field, or it holds the DEEP_SLEEP_MINUTES
-            // default – either is a reasonable retry interval.
+        } else {
+            snprintf(res_friendly_id, sizeof(res_friendly_id), "%s", log_res.friendly_id);
         }
+        nvs_minutes_till_refresh = log_res.sleep_minutes;
         ESP_LOGI(TAG, "Device not onboarded (HTTP %d). Claim ID: %s, retry in %d min",
                  status_code, res_friendly_id, nvs_minutes_till_refresh);
         draw_claim_screen(res_friendly_id, nvs_minutes_till_refresh);
         schedule_rtc_wakeup_minutes(nvs_minutes_till_refresh);
     } else {
-        // Normal onboarded response: render via FastJsonDL.
-        draw_response_analisis();
+        sync_rtc_and_alarm(log_res);
+        free(local_response_buffer);
+        local_response_buffer = NULL;
+        fetch_and_render_playlist();
     }
 
-    // Clean up
-    esp_http_client_cleanup(client);
-    free(local_response_buffer);
+    if (local_response_buffer) {
+        free(local_response_buffer);
+    }
 }
 
 static void flush_str(char *buf, void *priv)
