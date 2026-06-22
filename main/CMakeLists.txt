@@ -4,9 +4,11 @@ message(STATUS "→ Building example for ${target}")
 
 # 1 Send SCD40 using Rainmaker
 #set(app_sources "CO2-read/C5-OTA-fast-1.4.cpp")
+set(app_sources "CO2-read/C5-json-render.cpp")
 # Only test I2C. RTC address is 0x51
 # Tests after whole I2C refactoring
-set(app_sources "json-dl/test1.cpp")
+#set(app_sources "json-dl/test1.cpp")
+#set(app_sources "json-dl/initial.cpp")
 #set(app_sources "tools/i2cscan.c")
 #set(app_sources "tools/test_bb_rtc.cpp")
 #set(app_sources "tools/test_bq27426.cpp")
