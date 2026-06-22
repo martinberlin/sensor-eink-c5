@@ -20,7 +20,7 @@ set(app_sources "CO2-read/C5-json-render.cpp")
 # 4 new small white PCB C3 
 set(app_requires  
                  i2c_bus
-                 fastepd
+                 FastEPD
                  bb_rtc
                  FastJsonDL
                  BQ27426_idf

@@ -1,9 +1,6 @@
 [submodule "components/BQ27426_idf"]
 	path = components/BQ27426_idf
 	url = https://github.com/martinberlin/BQ27426_idf.git
-[submodule "components/fastepd"]
-	path = components/fastepd
-	url = https://github.com/martinberlin/FastEPD-C5.git
 [submodule "components/bb_rtc"]
 	path = components/bb_rtc
 	url = https://github.com/martinberlin/bb_rtc_i2cmaster.git
@@ -16,3 +13,9 @@
 [submodule "components/FastJsonDL"]
 	path = components/FastJsonDL
 	url = https://github.com/martinberlin/FastJsonDL.git
+[submodule "components/FastEPD"]
+	path = components/FastEPD
+	url = https://github.com/martinberlin/FastEPD-C5.git
+[submodule "components/miniz"]
+	path = components/miniz
+	url = https://github.com/martinberlin/miniz-esp32.git
