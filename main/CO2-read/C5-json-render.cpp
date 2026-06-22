@@ -158,8 +158,12 @@ typedef struct
 json_gen_test_result_t result;
 static char *output_buffer; // Buffer to store response of http request from event handler
 
-// Draw commands received from the server (a JSON array string)
+// Draw commands received from the server (a JSON array string).
+// Must stay comfortably below MAX_HTTP_OUTPUT_BUFFER (the remaining bytes are
+// consumed by the outer JSON fields: status, alarm, datetime, sleep_minutes…).
 #define MAX_DRAW_JSON_LEN 7168
+static_assert(MAX_DRAW_JSON_LEN < MAX_HTTP_OUTPUT_BUFFER,
+              "MAX_DRAW_JSON_LEN must fit inside the HTTP receive buffer");
 static char res_draw_json[MAX_DRAW_JSON_LEN] = {0};
 
 // Flag to know that how many times the device booted
@@ -779,25 +783,42 @@ void parse_json(const char* json_string)
     struct tm cTime = {};
     cJSON *alarm = cJSON_GetObjectItem(root, "alarm");
     if (alarm) {
-        aTime.tm_mday = cJSON_GetObjectItem(alarm, "day")->valueint;
-        aTime.tm_mon  = cJSON_GetObjectItem(alarm, "mo")->valueint;
-        aTime.tm_year = cJSON_GetObjectItem(alarm, "year")->valueint;
-        aTime.tm_hour = cJSON_GetObjectItem(alarm, "hr")->valueint;
-        aTime.tm_min  = cJSON_GetObjectItem(alarm, "min")->valueint;
-        alarm_day  = aTime.tm_mday;
-        alarm_hour = aTime.tm_hour;
-        alarm_min  = aTime.tm_min;
+        cJSON *day  = cJSON_GetObjectItem(alarm, "day");
+        cJSON *mo   = cJSON_GetObjectItem(alarm, "mo");
+        cJSON *year = cJSON_GetObjectItem(alarm, "year");
+        cJSON *hr   = cJSON_GetObjectItem(alarm, "hr");
+        cJSON *min  = cJSON_GetObjectItem(alarm, "min");
+        if (cJSON_IsNumber(day) && cJSON_IsNumber(mo) && cJSON_IsNumber(year) &&
+            cJSON_IsNumber(hr)  && cJSON_IsNumber(min)) {
+            aTime.tm_mday = day->valueint;
+            aTime.tm_mon  = mo->valueint;
+            aTime.tm_year = year->valueint;
+            aTime.tm_hour = hr->valueint;
+            aTime.tm_min  = min->valueint;
+            alarm_day  = aTime.tm_mday;
+            alarm_hour = aTime.tm_hour;
+            alarm_min  = aTime.tm_min;
+        }
     }
 
     // datetime — used to sync the RTC once per day
     cJSON *datetime = cJSON_GetObjectItem(root, "datetime");
     if (datetime) {
-        cTime.tm_wday = cJSON_GetObjectItem(datetime, "wday")->valueint;
-        cTime.tm_mday = cJSON_GetObjectItem(datetime, "day")->valueint;
-        cTime.tm_mon  = cJSON_GetObjectItem(datetime, "mo")->valueint;
-        cTime.tm_year = cJSON_GetObjectItem(datetime, "year")->valueint;
-        cTime.tm_hour = cJSON_GetObjectItem(datetime, "hr")->valueint;
-        cTime.tm_min  = cJSON_GetObjectItem(datetime, "min")->valueint;
+        cJSON *wday = cJSON_GetObjectItem(datetime, "wday");
+        cJSON *day  = cJSON_GetObjectItem(datetime, "day");
+        cJSON *mo   = cJSON_GetObjectItem(datetime, "mo");
+        cJSON *year = cJSON_GetObjectItem(datetime, "year");
+        cJSON *hr   = cJSON_GetObjectItem(datetime, "hr");
+        cJSON *min  = cJSON_GetObjectItem(datetime, "min");
+        if (cJSON_IsNumber(wday) && cJSON_IsNumber(day) && cJSON_IsNumber(mo) &&
+            cJSON_IsNumber(year) && cJSON_IsNumber(hr)  && cJSON_IsNumber(min)) {
+            cTime.tm_wday = wday->valueint;
+            cTime.tm_mday = day->valueint;
+            cTime.tm_mon  = mo->valueint;
+            cTime.tm_year = year->valueint;
+            cTime.tm_hour = hr->valueint;
+            cTime.tm_min  = min->valueint;
+        }
     }
 
     // draw — JSON array string with FastJsonDL rendering commands
@@ -907,23 +928,20 @@ void draw_response_analisis() {
     // Battery indicator is drawn by read_batt_level() (already called in scd_read)
 
     // --- FastJsonDL: server-driven content below the header ---
-    if (res_draw_json[0] != '\0') {
+    if (dl == nullptr) {
+        ESP_LOGE(TAG, "FastJsonDL not initialized");
+    } else if (res_draw_json[0] != '\0') {
         // Wrap the items array in a full layout envelope for FastJsonDL.
         // "clear": false keeps the header strip already drawn above intact.
-        const size_t envelope_extra = 64;
-        size_t layout_len = strlen(res_draw_json) + envelope_extra;
-        char *layout = (char *)malloc(layout_len);
-        if (layout) {
-            snprintf(layout, layout_len,
-                     "{\"display_bpp\":4,\"clear\":false,\"items\":%s}",
-                     res_draw_json);
+        // The envelope prefix is: {"display_bpp":4,"clear":false,"items":}  = 43 chars + NUL
+        static const size_t ENVELOPE_OVERHEAD = 48;
+        static char layout[MAX_DRAW_JSON_LEN + ENVELOPE_OVERHEAD];
+        snprintf(layout, sizeof(layout),
+                 "{\"display_bpp\":4,\"clear\":false,\"items\":%s}",
+                 res_draw_json);
 
-            if (!dl->renderJsonString(layout)) {
-                ESP_LOGE(TAG, "FastJsonDL render error: %s", dl->getLastError());
-            }
-            free(layout);
-        } else {
-            ESP_LOGE(TAG, "OOM: cannot allocate FastJsonDL layout buffer");
+        if (!dl->renderJsonString(layout)) {
+            ESP_LOGE(TAG, "FastJsonDL render error: %s", dl->getLastError());
         }
     } else {
         ESP_LOGW(TAG, "No draw commands received from server");
@@ -1765,7 +1783,11 @@ void app_main()
 
     // Initialise FastJsonDL after the EPD panel is ready
     dl = new FastJsonDL(*epaper);
-    dl->setFontRegistry(g_fonts, sizeof(g_fonts) / sizeof(g_fonts[0]));
+    if (dl == nullptr) {
+        ESP_LOGE(TAG, "Failed to allocate FastJsonDL — server rendering disabled");
+    } else {
+        dl->setFontRegistry(g_fonts, sizeof(g_fonts) / sizeof(g_fonts[0]));
+    }
 
     esp_rmaker_console_init();
 
