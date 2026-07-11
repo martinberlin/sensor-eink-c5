@@ -12,7 +12,7 @@
 #define EXTIO_LED_GREEN  (8+2)  // IO1_2
 #define IO_BOOT_C5 GPIO_NUM_28
 
-float firmware_version = 1.10; //1.11 is last version let's keep it low so it doesn't update!
+float firmware_version = 1.12; //1.11 is last version let's keep it higher so it doesn't update!
 
 // Declare ASCII names for each of the supported RTC types
 const char *szType[] = {"Unknown", "PCF8563", "DS3231", "RV3032", "PCF85063A"};
@@ -989,53 +989,6 @@ void draw_claim_screen(const char* friendly_id, uint16_t sleep_minutes)
     epaper->fullUpdate(true, false, &box);
 }
 
-
-/**
- * @brief Renders the server response on the display.
- *
- * The top strip (≈40 px) always shows the next wakeup time and the battery
- * indicator.  Below that, the "draw" array received from the API is rendered
- * by FastJsonDL, so all layout decisions are made server-side.
- */
-void draw_response_analisis() {
-    // --- Top header strip ---
-    epaper->setFont(ubuntu12);
-    epaper->setTextColor(0x0);
-    char textbuffer[56];
-    snprintf(textbuffer, sizeof(textbuffer),
-             "NEXT WAKEUP Day:%d %02d:%02d  VER. %.2f",
-             alarm_day, alarm_hour, alarm_min, firmware_version);
-    epaper->drawString(textbuffer, 150, 30);
-
-    // Battery indicator is drawn by read_batt_level() (already called in scd_read)
-
-    // --- FastJsonDL: server-driven content below the header ---
-    if (dl == nullptr) {
-        ESP_LOGE(TAG, "FastJsonDL not initialized");
-    } else if (res_draw_json[0] != '\0') {
-        // Wrap the items array in a full layout envelope for FastJsonDL.
-        // "clear": false keeps the header strip already drawn above intact.
-        // The envelope prefix is: {"display_bpp":4,"clear":false,"items":}  = 43 chars + NUL
-        static const size_t ENVELOPE_OVERHEAD = 48;
-        static char layout[MAX_DRAW_JSON_LEN + ENVELOPE_OVERHEAD];
-        snprintf(layout, sizeof(layout),
-                 "{\"display_bpp\":4,\"clear\":false,\"items\":%s}",
-                 res_draw_json);
-
-                 printf("LAY: %s\n", layout);
-
-        if (!dl->renderJsonString(layout)) {
-            ESP_LOGE(TAG, "FastJsonDL render error: %s", dl->getLastError());
-        } else {
-            ESP_LOGI(TAG, "FastJsonDL render done");
-        }
-    } else {
-        ESP_LOGW(TAG, "No draw commands received from server");
-    }
-
-    epaper->fullUpdate();
-}
-
 // IMPORTANT: Stays we will take care of this later
 // --- helper: schedule RTC wake in N minutes (simple normalization) ---
 static void schedule_rtc_wakeup_minutes(int minutes)
@@ -1143,7 +1096,7 @@ void fetch_and_render_playlist()
         snprintf(textbuffer, sizeof(textbuffer),
                  "NEXT WAKEUP Day:%d %02d:%02d  VER. %.2f",
                  alarm_day, alarm_hour, alarm_min, firmware_version);
-        epaper->drawString(textbuffer, 150, 30);
+        epaper->drawString(textbuffer, 675, 42);
 
         // Re-draw battery level indicator
         read_batt_level();
