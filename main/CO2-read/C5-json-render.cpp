@@ -12,7 +12,7 @@
 #define EXTIO_LED_GREEN  (8+2)  // IO1_2
 #define IO_BOOT_C5 GPIO_NUM_28
 
-float firmware_version = 1.10; //1.11 is last version let's keep it low so it doesn't update!
+float firmware_version = 1.11; //1.11 is last version let's keep it low so it doesn't update!
 
 // Declare ASCII names for each of the supported RTC types
 const char *szType[] = {"Unknown", "PCF8563", "DS3231", "RV3032", "PCF85063A"};
@@ -39,13 +39,23 @@ int batt_level = 0;
 #include "fast/ubuntu20.h"
 #include "fast/ubuntu30.h"
 #include "fast/ubuntu40.h"
+
+#include "fast/robotomono12.h"
+#include "fast/robotomono20.h"
+#include "fast/robotomono30.h"
+#include "fast/robotomono40.h"
 // FastJsonDL: server-driven rendering
 #include "FastJsonDL.h"
 static FastJsonDL *dl = nullptr;
 static const FastJsonDLFont g_fonts[] = {
+    { "Ubuntu12", ubuntu20 },
     { "Ubuntu20", ubuntu20 },
     { "Ubuntu30", ubuntu30 },
     { "Ubuntu40", ubuntu40 },
+    { "RobotoMono12", robotomono12 },
+    { "RobotoMono20", robotomono20 },
+    { "RobotoMono30", robotomono30 },
+    { "RobotoMono40", robotomono40 },
 };
 static const char *TAG = "CO2_ST";
 // Rainmaker
