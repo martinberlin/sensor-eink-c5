@@ -48,7 +48,7 @@ int batt_level = 0;
 #include "FastJsonDL.h"
 static FastJsonDL *dl = nullptr;
 static const FastJsonDLFont g_fonts[] = {
-    { "Ubuntu12", ubuntu20 },
+    { "Ubuntu12", ubuntu12 },
     { "Ubuntu20", ubuntu20 },
     { "Ubuntu30", ubuntu30 },
     { "Ubuntu40", ubuntu40 },
